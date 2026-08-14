@@ -8,7 +8,14 @@ locals {
 }
 
 data "aws_subnet" "subnet" {
-  count = var.number_azs
+  count = length(var.subnet_ids)
 
   id = local.subnet_ids[count.index]
+
+  lifecycle {
+    precondition {
+      condition     = tonumber(var.number_azs) == length(var.subnet_ids)
+      error_message = "number_azs must equal the number of entries in subnet_ids so every Availability Zone has exactly one subnet lookup."
+    }
+  }
 }

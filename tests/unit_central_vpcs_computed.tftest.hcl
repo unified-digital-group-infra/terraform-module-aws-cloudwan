@@ -5,18 +5,12 @@ mock_provider "aws" {
       zone_ids = ["use1-az1", "use1-az2", "use1-az3"]
     }
   }
-
-  mock_data "aws_networkmanager_core_network_policy_document" {
-    defaults = {
-      json = "{\"version\":\"2021.12\",\"core-network-configuration\":{},\"segments\":[]}"
-    }
-  }
 }
 
-run "validate" {
+run "computed_central_vpc_name_and_cidr_plan" {
   command = plan
 
   module {
-    source = "./examples/basic"
+    source = "./tests/fixtures/computed-central-vpcs"
   }
 }

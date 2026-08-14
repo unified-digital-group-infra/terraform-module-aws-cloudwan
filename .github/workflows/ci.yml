@@ -1,0 +1,102 @@
+name: Terraform CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  fmt:
+    name: Terraform format
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.15.8
+          terraform_wrapper: false
+
+      - name: Check formatting
+        run: terraform fmt -check -recursive
+
+  validate-and-test:
+    name: Validate and unit test (${{ matrix.provider.label }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        provider:
+          - label: minimum
+            version: 6.0.0
+          - label: latest
+            version: latest
+    env:
+      TF_IN_AUTOMATION: "true"
+      TF_INPUT: "false"
+      TF_PLUGIN_CACHE_DIR: ${{ runner.temp }}/terraform-plugin-cache
+      AWS_PROVIDER_VERSION: ${{ matrix.provider.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.15.8
+          terraform_wrapper: false
+
+      - name: Create provider plugin cache
+        run: mkdir -p "$TF_PLUGIN_CACHE_DIR"
+
+      - name: Pin minimum provider when requested
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$AWS_PROVIDER_VERSION" == "latest" ]]; then
+            exit 0
+          fi
+
+          for dir in \
+            . \
+            examples/basic \
+            examples/central_vpcs \
+            examples/central_vpcs_inspection \
+            examples/core_network_share \
+            examples/reference_global_network; do
+            cat > "$dir/zz_ci_provider_override.tf" <<EOF
+          terraform {
+            required_providers {
+              aws = {
+                source  = "hashicorp/aws"
+                version = "= $AWS_PROVIDER_VERSION"
+              }
+            }
+          }
+          EOF
+          done
+
+      - name: Initialize and validate root plus examples
+        shell: bash
+        run: |
+          set -euo pipefail
+          for dir in \
+            . \
+            examples/basic \
+            examples/central_vpcs \
+            examples/central_vpcs_inspection \
+            examples/core_network_share \
+            examples/reference_global_network; do
+            terraform -chdir="$dir" init -backend=false -input=false -upgrade
+            terraform -chdir="$dir" validate
+          done
+
+      - name: Run mocked contract and example plans
+        run: terraform test -no-color

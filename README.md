@@ -5,6 +5,10 @@ This module can be used to deploy an [AWS Cloud WAN](https://docs.aws.amazon.com
 
 In addition, the module abstracts Central VPCs' creation and Core Network attachment - with the Global Network and Core Network created either within or outside the same module definition. Central VPC types supported are Inspection, Egress (with or without inspection), Ingress (with or without inspection), and Shared Services. Below you can find more information about the format and definition of each VPC type.
 
+> **AWS provider 6 compatibility break in v3.5:** this release requires `hashicorp/aws >= 6.0.0`. Callers that constrain the provider to `~> 5.x` cannot select v3.5 and must upgrade their provider constraint before upgrading this module. The v6 floor is intentional because the `region` argument used by the module's AWS RAM resources is available only with AWS provider v6; v3.4.1 does not validate with provider 5.x after that argument was introduced (tracked in upstream issue #31).
+
+> **Provider identity reads in v3.5:** the module now always reads `aws_partition.current` and `aws_caller_identity.current`. These data sources keep `global_network_arn` stable during planning when a caller-supplied `global_network_id` is computed.
+
 ## Global Network and Core Network
 
 Two variables - `var.global_network` and `var.core_network` - are used to define the Global Network and Core Network. Starting with the **Global Network**, the following attributes can be configured:
@@ -17,11 +21,15 @@ If a Global Network is already created and it is desired to pass only the resour
 Following with the **Core Network**, the following attributes can be configured:
 
 - `description`                              = (string) Core Network's description.
-- `policy_document`                          = (any) Core Network's policy in JSON format. It is recommended the use of the [Core Network Document data source](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/data-sources/networkmanager_core_network_policy_document).
+- `policy_document`                          = (string) Core Network's policy in JSON format. It is recommended the use of the [Core Network Document data source](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/data-sources/networkmanager_core_network_policy_document).
+- `base_policy_document`                     = (Optional|string) Explicit base policy JSON used only when the Core Network is initially created. Conflicts with `base_policy_regions`.
+- `base_policy_regions`                      = (Optional|collection(string)) Regions used to generate the base policy only when the Core Network is initially created. Conflicts with `base_policy_document`.
 - `resource_share_name`                      = (Optional|string) AWS Resource Access Manager (RAM) Resource Share name. Providing this value, RAM resources will be created to share the Core Network with the principals indicated in `var.core_network.ram_share_principals`.
 - `resource_share_allow_external_principals` = (Optional|bool) Indicates whether principals outside your AWS Organization can be associated with a Resource Share.
 - `ram_share_principals`                     = (Optional|list(string)) List of principals (AWS Account or AWS Organization) to share the Core Network with.
 - `tags`                                     = (Optional|map(string)) Tags to apply to the Core Network and RAM Resource Share (if created) resources.
+
+Creation and reference inputs are explicit XORs. When creating a Core Network, set exactly one of `global_network` or `global_network_id`. When creating or attaching Central VPCs, set exactly one of `core_network` or `core_network_arn`. Supplying both is rejected instead of silently preferring one source.
 
 If a Core Network is already created and it is desired to pass only the resource ARN to attach Central VPCs, use the `var.core_network_arn` variable.
 
@@ -32,13 +40,13 @@ The example below builds an AWS Network Manager Global Network and Core Network 
 ```hcl
 module "cloudwan" {
   source  = "aws-ia/cloudwan/aws"
-  version = "3.x.x"
+  version = "~> 3.5"
 
   global_network = {
     description = "Global Network - AWS Cloud WAN Module"
 
     tags = {
-      Name "global-network"
+      Name = "global-network"
     }
   }
   core_network = {
@@ -61,9 +69,9 @@ If you already have a Network Manager Global Network created, you can pass the I
 ```hcl
 module "cloudwan" {
   source  = "aws-ia/cloudwan/aws"
-  version = "3.x.x"
+  version = "~> 3.5"
 
-  global_network_id "global-network-021aedd98c7487b93"
+  global_network_id = "global-network-021aedd98c7487b93"
 
   core_network = {
     description     = "Global Network - AWS CloudWAN Module"
@@ -84,7 +92,7 @@ In addition, when creating a new Core Network, you can also share it using [AWS 
 ```hcl
 module "cloud_wan" {
   source  = "aws-ia/cloudwan/aws"
-  version = "3.x.x"
+  version = "~> 3.5"
 
   global_network = {
     description = "Global Network - ${var.identifier}"
@@ -100,7 +108,7 @@ module "cloud_wan" {
 
     resource_share_name                      = "core-network-share"
     resource_share_allow_external_principals = false
-    ram_share_principals                     = [org-XXX]
+    ram_share_principals                     = ["123456789012"]
 
     tags = {
       Name = "core-network"
@@ -115,7 +123,13 @@ module "cloud_wan" {
 
 ### Policy Creation
 
-Policy documents can be passed as a string of JSON or using the [policy\_document data source](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/data-sources/networkmanager_core_network_policy_document) (recommended option).
+Policy documents can be passed as a string of JSON or using the [policy\_document data source](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/data-sources/networkmanager_core_network_policy_document) (recommended option). The document must be valid JSON with `version`, `core-network-configuration`, and `segments` as a list.
+
+#### Base policy bootstrap is create-only
+
+By default, the module preserves the v3 behavior and derives the initial base policy from `policy_document`. For an explicit bootstrap, set exactly one of `core_network.base_policy_document` or `core_network.base_policy_regions`; `policy_document` remains required as the definitive policy attachment.
+
+These two bootstrap inputs are **create-only**. The AWS provider sends them during `CreateCoreNetwork`, but changing either value after the Core Network exists does not update the LIVE base policy, and enabling a document later can be ignored by the provider. Do not treat them as continuously managed policy settings. To change policy after creation, update `policy_document` through the policy attachment and review the resulting Cloud WAN change set.
 
 ```hcl
 data "aws_networkmanager_core_network_policy_document" "policy" {
@@ -204,7 +218,7 @@ Regarding the VPC routing, a default route (0.0.0.0/0) is created in the **endpo
 ```hcl
 module "inspection_vpc" {
   source  = "aws-ia/cloudwan/aws"
-  version = "3.x.x"
+  version = "~> 3.5"
 
   core_network_arn = module.cloud_wan.core_network.arn
 
@@ -254,7 +268,7 @@ Regarding the VPC routing, the default configuration of the `connect_to_public_n
 ```hcl
 module "egress_vpc" {
   source  = "aws-ia/cloudwan/aws"
-  version = "3.x.x"
+  version = "~> 3.5"
 
   core_network_arn = module.cloud_wan.core_network.arn
 
@@ -311,7 +325,7 @@ Regarding the VPC routing, the default configuration of the `connect_to_public_n
 ```hcl
 module "egress_with_inspection_vpc" {
   source  = "aws-ia/cloudwan/aws"
-  version = "3.x.x"
+  version = "~> 3.5"
 
   core_network_arn = module.cloud_wan.core_network.arn
 
@@ -361,9 +375,9 @@ In addition, additional attributes can be configured for both the **public** and
 Regarding the VPC routing, the CIDR block or Prefix List defined in `var.ipv4_network_definition` (required in this VPC type) will be used to create a VPC route to the Core Network in the **public** route tables.
 
 ```hcl
-module "egress_with_inspection_vpc" {
+module "ingress_vpc" {
   source  = "aws-ia/cloudwan/aws"
-  version = "3.x.x"
+  version = "~> 3.5"
 
   core_network_arn = module.cloud_wan.core_network.arn
 
@@ -416,9 +430,9 @@ In addition, additional attributes can be configured for both the **public** and
 Regarding the VPC routing, the CIDR block or Prefix List defined in `var.ipv4_network_definition` (required in this VPC type) will be used to create a VPC route to the Core Network in the **public** route tables.
 
 ```hcl
-module "egress_with_inspection_vpc" {
+module "ingress_with_inspection_vpc" {
   source  = "aws-ia/cloudwan/aws"
-  version = "3.x.x"
+  version = "~> 3.5"
 
   core_network_arn = module.cloud_wan.core_network.arn
 
@@ -459,12 +473,12 @@ In addition, additional attributes can be configured for both the **core\_networ
 - `require_acceptance`      = (Optional|bool) Whether the core network VPC attachment requires acceptance or not. Defaults to `false`.
 - `accept_attachment`       = (Optional|bool) Whether the core network VPC attachment is accepted or not in the segment. Only valid if `require_acceptance` is set to `true`. Defaults to `true`.
 
-Regarding the VPC routing, a default route (0.0.0.0/0) poiting to the Core Network attachment will be created in any private route table you create.
+Regarding the VPC routing, a default route (`0.0.0.0/0`) pointing to the Core Network attachment is created for each caller-defined service subnet group. The `core_network` and `public` keys are reserved and excluded from this generated route map. A `shared_services` VPC with only `core_network` is valid and produces an empty generated service-subnet route map.
 
 ```hcl
-module "egress_with_inspection_vpc" {
+module "shared_services_vpc" {
   source  = "aws-ia/cloudwan/aws"
-  version = "3.x.x"
+  version = "~> 3.5"
 
   core_network_arn = module.cloud_wan.core_network.arn
 
@@ -509,7 +523,7 @@ If you configure the creation of an AWS Network Firewall resource in an Inspecti
 ```hcl
 module "cloudwan_central_vpcs" {
   source  = "aws-ia/cloudwan/aws"
-  version = "3.x.x"
+  version = "~> 3.5"
 
   global_network = {
     description = "Global Network"
@@ -566,7 +580,7 @@ If you configure the creation of an AWS Network Firewall resource in an Egress V
 ```hcl
 module "cloudwan_central_vpcs" {
   source  = "aws-ia/cloudwan/aws"
-  version = "3.x.x"
+  version = "~> 3.5"
 
   global_network = {
     description = "Global Network"
@@ -625,7 +639,7 @@ If you configure the creation of an AWS Network Firewall resource in an Ingress 
 ```hcl
 module "cloudwan_central_vpcs" {
   source  = "aws-ia/cloudwan/aws"
-  version = "3.x.x"
+  version = "~> 3.5"
 
   global_network = {
     description = "Global Network"
@@ -712,20 +726,20 @@ As described in the error itself, you first need to create the IPAM pool to then
 ## Requirements
 
 | Name | Version |
-|------|---------|
+| ---- | ------- |
 | <a name="requirement_terraform"></a> [terraform](#requirement\_terraform) | >= 1.3.0 |
-| <a name="requirement_aws"></a> [aws](#requirement\_aws) | >= 5.21.0 |
+| <a name="requirement_aws"></a> [aws](#requirement\_aws) | >= 6.0.0 |
 
 ## Providers
 
 | Name | Version |
-|------|---------|
-| <a name="provider_aws"></a> [aws](#provider\_aws) | >= 5.21.0 |
+| ---- | ------- |
+| <a name="provider_aws"></a> [aws](#provider\_aws) | >= 6.0.0 |
 
 ## Modules
 
 | Name | Source | Version |
-|------|--------|---------|
+| ---- | ------ | ------- |
 | <a name="module_central_vpcs"></a> [central\_vpcs](#module\_central\_vpcs) | aws-ia/vpc/aws | 4.5.0 |
 | <a name="module_core_network_tags"></a> [core\_network\_tags](#module\_core\_network\_tags) | aws-ia/label/aws | 0.0.6 |
 | <a name="module_global_network_tags"></a> [global\_network\_tags](#module\_global\_network\_tags) | aws-ia/label/aws | 0.0.6 |
@@ -736,7 +750,7 @@ As described in the error itself, you first need to create the IPAM pool to then
 ## Resources
 
 | Name | Type |
-|------|------|
+| ---- | ---- |
 | [aws_networkmanager_core_network.core_network](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/networkmanager_core_network) | resource |
 | [aws_networkmanager_core_network_policy_attachment.policy_attachment](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/networkmanager_core_network_policy_attachment) | resource |
 | [aws_networkmanager_global_network.global_network](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/networkmanager_global_network) | resource |
@@ -745,28 +759,37 @@ As described in the error itself, you first need to create the IPAM pool to then
 | [aws_ram_resource_share.resource_share](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/ram_resource_share) | resource |
 | [aws_route_table.igw_route_table](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/route_table) | resource |
 | [aws_route_table_association.igw_route_table_association](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/route_table_association) | resource |
-| [aws_prefix_list.ipv4_network_definition](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/data-sources/prefix_list) | data source |
+| [aws_caller_identity.current](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/data-sources/caller_identity) | data source |
+| [aws_ec2_managed_prefix_list.ipv4_network_definition](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/data-sources/ec2_managed_prefix_list) | data source |
+| [aws_partition.current](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/data-sources/partition) | data source |
 
 ## Inputs
 
 | Name | Description | Type | Default | Required |
-|------|-------------|------|---------|:--------:|
-| <a name="input_aws_network_firewall"></a> [aws\_network\_firewall](#input\_aws\_network\_firewall) | AWS Network Firewall configuration. This variable expect a map of Network Firewall definitions to create a firewall resource (and corresponding VPC routing to firewall endpoints) in the corresponding VPC. The central VPC to create the resources is specified by using the same map key as in var.central\_vpcs. Resources will be created only in VPC types `inspection`, `egress_with_inspection`, and `ingress_with_inspection`.<br/>Each map item expects the following attributes:<br/>- `name`                     = (string) Name of the AWS Network Firewall resource.<br/>- `description`              = (string) Description of the AWS Network Firewall resource.<br/>- `policy_arn`               = (string) ARN of the Network Firewall Policy.<br/>- `delete_protection`        = (Optional\|bool) Indicates whether it is possible to delete the firewall. Defaults to `false`.<br/>- `policy_change_protection` = (Optional\|bool) Indicates whether it is possible to change the firewall policy. Defaults to `false`.<br/>- `subnet_change_protection` = (Optional\|bool) Indicates whether it is possible to change the associated subnet(s) after creation. Defaults to `false`.<br/>- `tags`                     = (Optional\|map(string)) Tags to apply to the AWS Network Firewall resource. | `any` | `{}` | no |
-| <a name="input_central_vpcs"></a> [central\_vpcs](#input\_central\_vpcs) | Central VPCs definition. This variable expects a map of VPCs. You can specify the following attributes:<br/>- `type`                     = (string) VPC type (`inspection`, `egress`, `egress_with_inspection`, `ingress`, `ingress_with_inspection`, `shared_services`) - each one of them with a specific VPC routing. For more information about the configuration of each VPC type, check the README.<br/>- `name`                     = (Optional\|string) Name of the VPC. If not defined, the key of the map will be used.<br/>- `cidr_block`               = (Optional\|string) IPv4 CIDR range. **Cannot set if vpc\_ipv4\_ipam\_pool\_id is set.**<br/>- `vpc_ipv4_ipam_pool_id`    = (Optional\|string) Set to use IPAM to get an IPv4 CIDR block.  **Cannot set if cidr\_block is set.**<br/>- `vpc_ipv4_netmask_length`  = (Optional\|number) Set to use IPAM to get an IPv4 CIDR block using a specified netmask. Must be set with `var.vpc_ipv4_ipam_pool_id`.<br/>- `az_count`                 = (number) Searches the number of AZs in the region and takes a slice based on this number - the slice is sorted a-z.<br/>- `vpc_enable_dns_hostnames` = (Optional\|bool) Indicates whether the instances launched in the VPC get DNS hostnames. Enabled by default.<br/>- `vpc_enable_dns_support`   = (Optional\|bool) Indicates whether the DNS resolution is supported for the VPC. If enabled, queries to the Amazon provided DNS server at the 169.254.169.253 IP address, or the reserved IP address at the base of the VPC network range "plus two" succeed. If disabled, the Amazon provided DNS service in the VPC that resolves public DNS hostnames to IP addresses is not enabled. Enabled by default.<br/>- `vpc_instance_tenancy`     = (Optional\|string) The allowed tenancy of instances launched into the VPC.<br/>- `vpc_flow_logs`            = (Optional\|object(any)) Configuration of the VPC Flow Logs of the VPC configured. Options: "cloudwatch", "s3", "none".<br/>- `subnets`                  = (any) Configuration of the subnets to create in the VPC. Depending the VPC type, the format (subnets to configure and resources created by the module) will be different. Check the README for more information. <br/>- `tags`                     = (Optional\|map(string)) Tags to apply to all the Central VPC resources. | `any` | `{}` | no |
-| <a name="input_core_network"></a> [core\_network](#input\_core\_network) | Core Network definition - providing information to this variable will create a new Core Network. Conflicts with `var.core_network_arn`.<br/>This variable expects the following attributes:<br/>- `description`                              = (string) Core Network's description.<br/>- `policy_document`                          = (any) Core Network's policy in JSON format.<br/>- `resource_share_name`                      = (Optional\|string) AWS Resource Access Manager (RAM) Resource Share name. Providing this value, RAM resources will be created to share the Core Network with the principals indicated in `var.core_network.ram_share_principals`.<br/>- `resource_share_allow_external_principals` = (Optional\|bool) Indicates whether principals outside your AWS Organization can be associated with a Resource Share.<br/>- `ram_share_principals`                     = (Optional\|list(string)) List of principals (AWS Account or AWS Organization) to share the Core Network with.<br/>- `tags`                                     = (Optional\|map(string)) Tags to apply to the Core Network and RAM Resource Share (if created). | `any` | `{}` | no |
+| ---- | ----------- | ---- | ------- | :------: |
+| <a name="input_aws_network_firewall"></a> [aws\_network\_firewall](#input\_aws\_network\_firewall) | AWS Network Firewall configuration. This variable expects a map of Network Firewall definitions to create a firewall resource (and corresponding VPC routing to firewall endpoints) in the corresponding VPC. The central VPC is selected by using the same map key as in var.central\_vpcs. Resources are created only in VPC types `inspection`, `egress_with_inspection`, and `ingress_with_inspection`.<br/>Each map item expects the following attributes:<br/>- `name`                     = (string) Name of the AWS Network Firewall resource.<br/>- `description`              = (string) Description of the AWS Network Firewall resource.<br/>- `policy_arn`               = (string) ARN of the Network Firewall Policy.<br/>- `delete_protection`        = (Optional\|bool) Indicates whether it is possible to delete the firewall. Defaults to `false`.<br/>- `policy_change_protection` = (Optional\|bool) Indicates whether it is possible to change the firewall policy. Defaults to `false`.<br/>- `subnet_change_protection` = (Optional\|bool) Indicates whether it is possible to change the associated subnet(s) after creation. Defaults to `false`.<br/>- `tags`                     = (Optional\|map(string)) Tags to apply to the AWS Network Firewall resource. | <pre>map(object({<br/>    name                     = string<br/>    description              = string<br/>    policy_arn               = string<br/>    delete_protection        = optional(bool)<br/>    policy_change_protection = optional(bool)<br/>    subnet_change_protection = optional(bool)<br/>    tags                     = optional(map(string))<br/>  }))</pre> | `{}` | no |
+| <a name="input_central_vpcs"></a> [central\_vpcs](#input\_central\_vpcs) | Central VPCs definition. This variable expects a map of VPCs. You can specify the following attributes:<br/>- `type`                     = (string) VPC type (`inspection`, `egress`, `egress_with_inspection`, `ingress`, `ingress_with_inspection`, `shared_services`) - each one of them with a specific VPC routing. For more information about the configuration of each VPC type, check the README.<br/>- `name`                     = (Optional\|string) Name of the VPC. If not defined, the key of the map will be used.<br/>- `cidr_block`               = (Optional\|string) IPv4 CIDR range. **Cannot set if vpc\_ipv4\_ipam\_pool\_id is set.**<br/>- `vpc_ipv4_ipam_pool_id`    = (Optional\|string) Set to use IPAM to get an IPv4 CIDR block. **Cannot set if cidr\_block is set.**<br/>- `vpc_ipv4_netmask_length`  = (Optional\|number) Set to use IPAM to get an IPv4 CIDR block using a specified netmask. Must be set with `var.vpc_ipv4_ipam_pool_id`.<br/>- `az_count`                 = (number) Searches the number of AZs in the region and takes a slice based on this number - the slice is sorted a-z.<br/>- `vpc_enable_dns_hostnames` = (Optional\|bool) Indicates whether the instances launched in the VPC get DNS hostnames. Enabled by default.<br/>- `vpc_enable_dns_support`   = (Optional\|bool) Indicates whether DNS resolution is supported for the VPC. Enabled by default.<br/>- `vpc_instance_tenancy`     = (Optional\|string) The allowed tenancy of instances launched into the VPC.<br/>- `vpc_flow_logs`            = (Optional\|object(any)) Configuration of the VPC Flow Logs of the VPC configured.<br/>- `subnets`                  = (any) Open subnet map passed through to the VPC module. Known address fields are validated without closing the nested shape.<br/>- `tags`                     = (Optional\|map(string)) Tags to apply to all the Central VPC resources. | `any` | `{}` | no |
+| <a name="input_core_network"></a> [core\_network](#input\_core\_network) | Core Network definition - providing information to this variable will create a new Core Network. Conflicts with `var.core_network_arn`.<br/>This variable expects the following attributes:<br/>- `description`                              = (string) Core Network's description.<br/>- `policy_document`                          = (string) Core Network's policy in JSON format.<br/>- `base_policy_document`                     = (Optional\|string) Explicit create-only base policy JSON. Conflicts with `base_policy_regions`.<br/>- `base_policy_regions`                      = (Optional\|collection(string)) Create-only Regions used to generate the base policy. Conflicts with `base_policy_document`.<br/>- `resource_share_name`                      = (Optional\|string) AWS Resource Access Manager (RAM) Resource Share name. Providing this value, RAM resources will be created to share the Core Network with the principals indicated in `var.core_network.ram_share_principals`.<br/>- `resource_share_allow_external_principals` = (Optional\|bool) Indicates whether principals outside your AWS Organization can be associated with a Resource Share.<br/>- `ram_share_principals`                     = (Optional\|list(string)) List of principals (AWS Account or AWS Organization) to share the Core Network with.<br/>- `tags`                                     = (Optional\|map(string)) Tags to apply to the Core Network and RAM Resource Share (if created). | `any` | `{}` | no |
 | <a name="input_core_network_arn"></a> [core\_network\_arn](#input\_core\_network\_arn) | (Optional) Core Network ARN. Conflicts with `var.core_network`. | `string` | `null` | no |
 | <a name="input_global_network"></a> [global\_network](#input\_global\_network) | Global Network definition - providing information to this variable will create a new Global Network. Conflicts with `var.global_network_id`.<br/>This variable expects the following attributes:<br/>- `description` = (string) Global Network's description.<br/>- `tags`        = (Optional\|map(string)) Tags to apply to the Global Network. | `any` | `{}` | no |
 | <a name="input_global_network_id"></a> [global\_network\_id](#input\_global\_network\_id) | (Optional) Global Network ID. Conflicts with `var.global_network`. | `string` | `null` | no |
-| <a name="input_ipv4_network_definition"></a> [ipv4\_network\_definition](#input\_ipv4\_network\_definition) | Definition of the IPv4 CIDR blocks of the AWS network - needed for the VPC routes in Ingress and Egress VPC types. You can specific either a CIDR range or a Prefix List ID. | `string` | `null` | no |
+| <a name="input_ipv4_network_definition"></a> [ipv4\_network\_definition](#input\_ipv4\_network\_definition) | Definition of the IPv4 CIDR blocks of the AWS network - needed for the VPC routes in Ingress and Egress VPC types. You can specify either a CIDR range or a Prefix List ID. | `string` | `null` | no |
 | <a name="input_tags"></a> [tags](#input\_tags) | (Optional) Tags to apply to all resources. | `map(string)` | `{}` | no |
 
 ## Outputs
 
 | Name | Description |
-|------|-------------|
+| ---- | ----------- |
 | <a name="output_aws_network_firewall"></a> [aws\_network\_firewall](#output\_aws\_network\_firewall) | AWS Network Firewall. Full output of aws\_networkfirewall\_firewall. |
+| <a name="output_central_vpc_ids"></a> [central\_vpc\_ids](#output\_central\_vpc\_ids) | Central VPC IDs keyed by the caller-owned central\_vpcs key. |
 | <a name="output_central_vpcs"></a> [central\_vpcs](#output\_central\_vpcs) | Central VPC information. Full output of VPC module - https://registry.terraform.io/modules/aws-ia/vpc/aws/latest. |
 | <a name="output_core_network"></a> [core\_network](#output\_core\_network) | Core Network. Full output of aws\_networkmanager\_core\_network. |
+| <a name="output_core_network_arn"></a> [core\_network\_arn](#output\_core\_network\_arn) | Core Network ARN, whether created by this module or supplied by the caller. |
+| <a name="output_core_network_attachment_ids"></a> [core\_network\_attachment\_ids](#output\_core\_network\_attachment\_ids) | Core Network VPC attachment IDs keyed by the caller-owned central\_vpcs key. |
+| <a name="output_core_network_id"></a> [core\_network\_id](#output\_core\_network\_id) | Core Network ID, whether created by this module or derived from a caller-supplied ARN. |
 | <a name="output_global_network"></a> [global\_network](#output\_global\_network) | Global Network. Full output of aws\_networkmanager\_global\_network. |
+| <a name="output_global_network_arn"></a> [global\_network\_arn](#output\_global\_network\_arn) | Global Network ARN, whether created by this module or derived for a caller-supplied ID. |
+| <a name="output_global_network_id"></a> [global\_network\_id](#output\_global\_network\_id) | Global Network ID, whether created by this module or supplied by the caller. |
 | <a name="output_ram_resource_share"></a> [ram\_resource\_share](#output\_ram\_resource\_share) | Resource Access Manager (RAM) Resource Share. Full output of aws\_ram\_resource\_share. |
+| <a name="output_ram_resource_share_arn"></a> [ram\_resource\_share\_arn](#output\_ram\_resource\_share\_arn) | RAM Resource Share ARN when this module creates the share. |
 <!-- END_TF_DOCS -->

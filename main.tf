@@ -16,14 +16,21 @@ resource "aws_networkmanager_global_network" "global_network" {
 resource "aws_networkmanager_core_network" "core_network" {
   count = local.create_core_network ? 1 : 0
 
-  description       = var.core_network.description
-  global_network_id = local.create_global_network ? aws_networkmanager_global_network.global_network[0].id : var.global_network_id
+  description = var.core_network.description
+  global_network_id = local.create_global_network ? aws_networkmanager_global_network.global_network[0].id : coalesce(
+    var.global_network_id,
+    "global-network-invalid"
+  )
 
   create_base_policy = true
-  base_policy_document = jsonencode({
-    for k, v in jsondecode(var.core_network.policy_document) : k => v
-    if k == "version" || k == "core-network-configuration" || k == "segments"
-  })
+  base_policy_document = try(var.core_network.base_policy_regions, null) != null ? null : coalesce(
+    try(var.core_network.base_policy_document, null),
+    jsonencode({
+      for k, v in jsondecode(var.core_network.policy_document) : k => v
+      if k == "version" || k == "core-network-configuration" || k == "segments"
+    })
+  )
+  base_policy_regions = try(var.core_network.base_policy_regions, null)
 
   tags = merge(
     module.tags.tags_aws,
@@ -75,7 +82,7 @@ resource "aws_ram_principal_association" "principal_association" {
 module "central_vpcs" {
   source   = "aws-ia/vpc/aws"
   version  = "4.5.0"
-  for_each = try(var.central_vpcs, {})
+  for_each = var.central_vpcs
 
   name       = try(each.value.name, each.key)
   cidr_block = try(each.value.cidr_block, null)
@@ -91,10 +98,16 @@ module "central_vpcs" {
   vpc_flow_logs = try(each.value.vpc_flow_logs, { log_destination_type = "none" })
 
   core_network = {
-    arn = try(aws_networkmanager_core_network.core_network[0].arn, var.core_network_arn)
-    id  = try(aws_networkmanager_core_network.core_network[0].id, split("/", var.core_network_arn)[1])
+    arn = local.create_core_network ? aws_networkmanager_core_network.core_network[0].arn : coalesce(
+      var.core_network_arn,
+      "arn:aws:networkmanager::000000000000:core-network/core-network-00000000"
+    )
+    id = local.create_core_network ? aws_networkmanager_core_network.core_network[0].id : try(
+      split("/", coalesce(var.core_network_arn, "arn:aws:networkmanager::000000000000:core-network/core-network-00000000"))[1],
+      "core-network-00000000"
+    )
   }
-  core_network_routes = each.value.type == "shared_services" ? { for k, v in each.value.subnets : k => "0.0.0.0/0" if k != "public" || k != "core_network" } : local.core_network_routes[each.value.type]
+  core_network_routes = each.value.type == "shared_services" ? { for k, v in each.value.subnets : k => "0.0.0.0/0" if k != "public" && k != "core_network" } : local.core_network_routes[each.value.type]
 
   subnets = merge(
     local.subnets[each.value.type],
@@ -111,10 +124,11 @@ module "central_vpcs" {
 module "network_firewall" {
   source  = "aws-ia/networkfirewall/aws"
   version = "1.0.2"
-  for_each = {
-    for k, v in try(var.central_vpcs, {}) : k => v
-    if contains(["inspection", "egress_with_inspection", "ingress_with_inspection"], v.type) && contains(keys(var.aws_network_firewall), k)
-  }
+  # Instance keys must come exclusively from caller-defined configuration so
+  # they stay plan-known even when values (e.g. a computed policy_arn) are
+  # unknown until apply (issue #25). Validity of each key is enforced by the
+  # actionable preconditions on output.aws_network_firewall.
+  for_each = var.aws_network_firewall
 
   network_firewall_name        = var.aws_network_firewall[each.key].name
   network_firewall_description = var.aws_network_firewall[each.key].description
@@ -124,11 +138,26 @@ module "network_firewall" {
   network_firewall_policy_change_protection = try(var.aws_network_firewall[each.key].policy_change_protection, false)
   network_firewall_subnet_change_protection = try(var.aws_network_firewall[each.key].subnet_change_protection, false)
 
-  vpc_id      = module.central_vpcs[each.key].vpc_attributes.id
-  vpc_subnets = { for k, v in module.central_vpcs[each.key].private_subnet_attributes_by_az : split("/", k)[1] => v.id if split("/", k)[0] == "endpoints" }
-  number_azs  = each.value.az_count
+  # Plan-known conditionals (not try()) keep evaluation alive for invalid
+  # firewall-to-VPC mappings so the output preconditions can fail the plan
+  # with an actionable message. try() must not wrap these values: it makes
+  # the result dynamically typed, which poisons plan-known keys downstream
+  # (the root cause behind issue #25 resurfacing with computed policy ARNs).
+  vpc_id = contains(keys(var.central_vpcs), each.key) ? module.central_vpcs[each.key].vpc_attributes.id : "vpc-invalid"
+  vpc_subnets = contains(keys(var.central_vpcs), each.key) ? {
+    for k, v in module.central_vpcs[each.key].private_subnet_attributes_by_az : split("/", k)[1] => v.id if split("/", k)[0] == "endpoints"
+  } : { invalid = "subnet-invalid" }
+  number_azs = contains(keys(var.central_vpcs), each.key) ? var.central_vpcs[each.key].az_count : 0
 
-  routing_configuration = local.routing_configuration[each.key]
+  # merge() instead of a conditional: routing_configuration values have
+  # heterogeneous shapes per firewall flow, and a conditional expression would
+  # force type unification across branches (Inconsistent conditional result
+  # types). merge() keeps each entry's own type; real configs win over the
+  # placeholder.
+  routing_configuration = merge(
+    { (each.key) = { centralized_inspection_without_egress = { connectivity_subnet_route_tables = {} } } },
+    local.routing_configuration
+  )[each.key]
 
   tags = merge(
     module.tags.tags_aws,
