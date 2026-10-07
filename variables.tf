@@ -135,8 +135,8 @@ variable "central_vpcs" {
     - `cidr_block`               = (Optional|string) IPv4 CIDR range. **Cannot set if vpc_ipv4_ipam_pool_id is set.**
     - `vpc_ipv4_ipam_pool_id`    = (Optional|string) Set to use IPAM to get an IPv4 CIDR block. **Cannot set if cidr_block is set.**
     - `vpc_ipv4_netmask_length`  = (Optional|number) Set to use IPAM to get an IPv4 CIDR block using a specified netmask. Must be set with `var.vpc_ipv4_ipam_pool_id`.
-    - `az_count`                 = (number) Searches the number of AZs in the region and takes a slice based on this number - the slice is sorted a-z.
-    - `azs`                      = (Optional|list(string)) List of availability zones to use for the VPC. If not specified, the module will use the first `az_count` availability zones in the region.
+    - `azs`                      = (Optional|list(string)) Explicit availability zone names to use for the VPC.
+    - `az_count`                 = (Optional|number) Number of AZs to use when `azs` is not supplied. Assumes the available list is sorted.
     - `vpc_enable_dns_hostnames` = (Optional|bool) Indicates whether the instances launched in the VPC get DNS hostnames. Enabled by default.
     - `vpc_enable_dns_support`   = (Optional|bool) Indicates whether DNS resolution is supported for the VPC. Enabled by default.
     - `vpc_instance_tenancy`     = (Optional|string) The allowed tenancy of instances launched into the VPC.
@@ -154,6 +154,7 @@ EOF
         "name",
         "cidr_block",
         "az_count",
+        "azs",
         "vpc_ipv4_ipam_pool_id",
         "vpc_ipv4_netmask_length",
         "vpc_enable_dns_hostnames",
@@ -164,7 +165,7 @@ EOF
         "tags"
       ])) == 0
     ]), false)
-    error_message = "Valid key values for Central VPCs are \"type\", \"name\", \"cidr_block\", \"az_count\", \"vpc_ipv4_ipam_pool_id\", \"vpc_ipv4_netmask_length\", \"vpc_enable_dns_hostnames\", \"vpc_enable_dns_support\", \"vpc_instance_tenancy\", \"subnets\", \"vpc_flow_logs\", and \"tags\"."
+    error_message = "Valid key values for Central VPCs are \"type\", \"name\", \"cidr_block\", \"az_count\", \"azs\", \"vpc_ipv4_ipam_pool_id\", \"vpc_ipv4_netmask_length\", \"vpc_enable_dns_hostnames\", \"vpc_enable_dns_support\", \"vpc_instance_tenancy\", \"subnets\", \"vpc_flow_logs\", and \"tags\"."
   }
 
   validation {
@@ -173,12 +174,15 @@ EOF
       contains(keys(vpc), "type") &&
       vpc.type == tostring(vpc.type) &&
       contains(["inspection", "egress", "egress_with_inspection", "shared_services", "ingress", "ingress_with_inspection"], vpc.type) &&
-      contains(keys(vpc), "az_count") &&
-      vpc.az_count == tonumber(vpc.az_count) &&
-      vpc.az_count > 0 && floor(vpc.az_count) == vpc.az_count &&
+      (
+        (try(vpc.azs, null) != null && length(vpc.azs) > 0 && alltrue([for az in vpc.azs : az == tostring(az)]) &&
+        (try(vpc.az_count, null) == null || vpc.az_count == length(vpc.azs))) ||
+        (try(vpc.azs, null) == null && try(vpc.az_count, null) != null &&
+        vpc.az_count == tonumber(vpc.az_count) && vpc.az_count > 0 && floor(vpc.az_count) == vpc.az_count)
+      ) &&
       contains(keys(vpc), "subnets") && length(keys(vpc.subnets)) > 0
     ]), false)
-    error_message = "Each var.central_vpcs entry must include a supported string type, a positive integer az_count, and a non-empty subnets map."
+    error_message = "Each var.central_vpcs entry must include a supported type, either a non-empty azs list or positive integer az_count, and a non-empty subnets map. If both azs and az_count are set, they must agree."
   }
 
   validation {
@@ -201,7 +205,7 @@ EOF
       for vpc in var.central_vpcs : [
         for subnet in values(vpc.subnets) :
         (try(subnet.cidrs, null) == null || (
-          length(subnet.cidrs) == vpc.az_count && alltrue([
+          length(subnet.cidrs) == try(length(vpc.azs), vpc.az_count) && alltrue([
             for cidr in subnet.cidrs : cidr == tostring(cidr)
           ])
         )) &&

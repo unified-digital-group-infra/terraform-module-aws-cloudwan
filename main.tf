@@ -147,7 +147,7 @@ module "network_firewall" {
   vpc_subnets = contains(keys(var.central_vpcs), each.key) ? {
     for k, v in module.central_vpcs[each.key].private_subnet_attributes_by_az : split("/", k)[1] => v.id if split("/", k)[0] == "endpoints"
   } : { invalid = "subnet-invalid" }
-  number_azs = contains(keys(var.central_vpcs), each.key) ? var.central_vpcs[each.key].az_count : 0
+  number_azs = contains(keys(var.central_vpcs), each.key) ? try(length(var.central_vpcs[each.key].azs), var.central_vpcs[each.key].az_count) : 0
 
   # merge() instead of a conditional: routing_configuration values have
   # heterogeneous shapes per firewall flow, and a conditional expression would
@@ -194,5 +194,5 @@ module "public_subnet_cidrs" {
   }
 
   subnet_ids = { for i, j in each.value.public_subnet_attributes_by_az : i => j.id }
-  number_azs = var.central_vpcs[each.key].az_count
+  number_azs = try(length(var.central_vpcs[each.key].azs), var.central_vpcs[each.key].az_count)
 }
