@@ -86,7 +86,7 @@ module "central_vpcs" {
 
   name       = try(each.value.name, each.key)
   cidr_block = try(each.value.cidr_block, null)
-  az_count   = each.value.az_count
+  azs        = try(each.value.azs, null)
 
   vpc_ipv4_ipam_pool_id   = try(each.value.vpc_ipv4_ipam_pool_id, null)
   vpc_ipv4_netmask_length = try(each.value.vpc_ipv4_netmask_length, null)

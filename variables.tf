@@ -136,6 +136,7 @@ variable "central_vpcs" {
     - `vpc_ipv4_ipam_pool_id`    = (Optional|string) Set to use IPAM to get an IPv4 CIDR block. **Cannot set if cidr_block is set.**
     - `vpc_ipv4_netmask_length`  = (Optional|number) Set to use IPAM to get an IPv4 CIDR block using a specified netmask. Must be set with `var.vpc_ipv4_ipam_pool_id`.
     - `az_count`                 = (number) Searches the number of AZs in the region and takes a slice based on this number - the slice is sorted a-z.
+    - `azs`                      = (Optional|list(string)) List of availability zones to use for the VPC. If not specified, the module will use the first `az_count` availability zones in the region.
     - `vpc_enable_dns_hostnames` = (Optional|bool) Indicates whether the instances launched in the VPC get DNS hostnames. Enabled by default.
     - `vpc_enable_dns_support`   = (Optional|bool) Indicates whether DNS resolution is supported for the VPC. Enabled by default.
     - `vpc_instance_tenancy`     = (Optional|string) The allowed tenancy of instances launched into the VPC.
